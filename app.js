@@ -4,22 +4,27 @@ const STORAGE_KEY = 'price_comparison_history';
 let priceChart = null;
 let currentProducts = [];
 
-// Initialize
 document.addEventListener('DOMContentLoaded', () => {
     const searchBtn = document.getElementById('searchBtn');
     const searchInput = document.getElementById('searchInput');
 
-    searchBtn.addEventListener('click', handleSearch);
-    searchInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') {
-            handleSearch();
-        }
-    });
+    if (searchBtn) {
+        searchBtn.addEventListener('click', handleSearch);
+    }
+
+    if (searchInput) {
+        searchInput.addEventListener('keypress', event => {
+            if (event.key === 'Enter') {
+                handleSearch();
+            }
+        });
+    }
 });
 
 async function handleSearch() {
-    const query = document.getElementById('searchInput').value.trim();
-    
+    const input = document.getElementById('searchInput');
+    const query = input ? input.value.trim() : '';
+
     if (!query) {
         showError('Please enter a product name to search');
         return;
@@ -30,57 +35,91 @@ async function handleSearch() {
     hideResults();
 
     try {
-        const response = await fetch(`${API_BASE_URL}/search?query=${encodeURIComponent(query)}`);
-        
+        const response = await fetch(
+            `${API_BASE_URL}/search?query=${encodeURIComponent(query)}`
+        );
+
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
 
         const data = await response.json();
-        currentProducts = data.products || [];
+
+        // Support both direct lists and object responses.
+        if (Array.isArray(data)) {
+            currentProducts = data;
+        } else if (data && Array.isArray(data.products)) {
+            currentProducts = data.products;
+        } else if (data && Array.isArray(data.results)) {
+            currentProducts = data.results;
+        } else {
+            currentProducts = [];
+        }
 
         if (currentProducts.length === 0) {
-            showError('No products found. Please try a different search term.');
-            showLoading(false);
+            showError(
+                'No products found. Try iphone, laptop, tv, headphone, watch, or camera.'
+            );
             return;
         }
 
         displayProducts(currentProducts);
         saveToHistory(query, currentProducts);
         showResults();
-        showLoading(false);
+
     } catch (error) {
         console.error('Search error:', error);
-        showError(`Error searching products: ${error.message}. Make sure the backend server is running on port 5000.`);
+
+        showError(
+            `Unable to search products: ${error.message}. Check that the Flask backend is running.`
+        );
+
+    } finally {
         showLoading(false);
     }
 }
 
 function displayProducts(products) {
     const productList = document.getElementById('productList');
+
+    if (!productList) return;
+
     productList.innerHTML = '';
 
     products.forEach((product, index) => {
         const card = document.createElement('div');
+
         card.className = 'product-card';
         card.dataset.index = index;
-        
-        // Get image from any available platform
-        const imageUrl = Object.values(product.prices || {})
-            .map(p => p.image)
-            .find(img => img) || 'https://via.placeholder.com/200?text=No+Image';
 
-        const platforms = ['flipkart', 'amazon', 'reliance', 'croma'];
+        const prices = product.prices || {};
+
+        const imageUrl = Object.values(prices)
+            .map(item => item && item.image)
+            .find(Boolean) ||
+            'https://via.placeholder.com/200?text=No+Image';
+
+        const platforms = [
+            'flipkart',
+            'amazon',
+            'reliance',
+            'croma'
+        ];
+
         const priceItems = platforms.map(platform => {
-            const priceData = product.prices[platform];
-            if (priceData && priceData.price > 0) {
+            const priceData = prices[platform];
+
+            if (priceData && Number(priceData.price) > 0) {
                 return `
                     <div class="price-item">
                         <span class="platform-name">${platform}</span>
-                        <span class="platform-price">₹${formatPrice(priceData.price)}</span>
+                        <span class="platform-price">
+                            ₹${formatPrice(priceData.price)}
+                        </span>
                     </div>
                 `;
             }
+
             return `
                 <div class="price-item">
                     <span class="platform-name">${platform}</span>
@@ -89,22 +128,48 @@ function displayProducts(products) {
             `;
         }).join('');
 
-        // Find the best price (lowest available)
-        const availablePrices = Object.entries(product.prices || {})
-            .filter(([_, data]) => data && data.price > 0)
-            .map(([platform, data]) => ({ platform, price: data.price, url: data.url }));
-        
-        const bestPrice = availablePrices.length > 0 
-            ? availablePrices.reduce((min, p) => p.price < min.price ? p : min)
+        const availablePrices = Object.entries(prices)
+            .filter(([, item]) => item && Number(item.price) > 0)
+            .map(([platform, item]) => ({
+                platform,
+                price: Number(item.price),
+                url: item.url || '#'
+            }));
+
+        const bestPrice = availablePrices.length
+            ? availablePrices.reduce((lowest, item) =>
+                item.price < lowest.price ? item : lowest
+            )
             : null;
 
         card.innerHTML = `
-            <img src="${imageUrl}" alt="${product.name}" onerror="this.src='https://via.placeholder.com/200?text=No+Image'" />
-            <h4>${product.name}</h4>
+            <img
+                src="${imageUrl}"
+                alt="${escapeHTML(product.name || 'Product')}"
+                onerror="this.src='https://via.placeholder.com/200?text=No+Image'"
+            >
+
+            <h4>${escapeHTML(product.name || 'Product')}</h4>
+
             <div class="product-prices">
                 ${priceItems}
             </div>
-            ${bestPrice ? `<a href="${bestPrice.url}" target="_blank" rel="noopener noreferrer" class="product-link" onclick="event.stopPropagation();">Best Price: ₹${formatPrice(bestPrice.price)}</a>` : ''}
+
+            ${
+                bestPrice
+                    ? `
+                        <a
+                            href="${bestPrice.url}"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            class="product-link"
+                            onclick="event.stopPropagation()"
+                        >
+                            Best Price: ₹${formatPrice(bestPrice.price)}
+                        </a>
+                    `
+                    : ''
+            }
         `;
 
         card.addEventListener('click', () => {
@@ -116,18 +181,18 @@ function displayProducts(products) {
 }
 
 function selectProduct(index) {
-    // Remove previous selection
     document.querySelectorAll('.product-card').forEach(card => {
         card.classList.remove('selected');
     });
 
-    // Select current product
     const card = document.querySelector(`[data-index="${index}"]`);
+
     if (card) {
         card.classList.add('selected');
     }
 
     const product = currentProducts[index];
+
     if (product) {
         displayComparison(product);
         displayGraph(product);
@@ -135,10 +200,12 @@ function selectProduct(index) {
 }
 
 function displayComparison(product) {
-    const comparisonSection = document.getElementById('comparisonSection');
-    const comparisonTable = document.getElementById('comparisonTable');
-    
-    comparisonSection.style.display = 'block';
+    const section = document.getElementById('comparisonSection');
+    const table = document.getElementById('comparisonTable');
+
+    if (!section || !table) return;
+
+    section.style.display = 'block';
 
     const platforms = [
         { key: 'flipkart', name: 'Flipkart' },
@@ -147,7 +214,7 @@ function displayComparison(product) {
         { key: 'croma', name: 'Croma' }
     ];
 
-    let tableHTML = `
+    let html = `
         <table>
             <thead>
                 <tr>
@@ -160,17 +227,28 @@ function displayComparison(product) {
     `;
 
     platforms.forEach(platform => {
-        const priceData = product.prices[platform.key];
-        if (priceData && priceData.price > 0) {
-            tableHTML += `
+        const item = (product.prices || {})[platform.key];
+
+        if (item && Number(item.price) > 0) {
+            html += `
                 <tr>
                     <td>${platform.name}</td>
-                    <td class="price-cell">₹${formatPrice(priceData.price)}</td>
-                    <td><a href="${priceData.url || '#'}" target="_blank" rel="noopener noreferrer">View Product</a></td>
+                    <td class="price-cell">
+                        ₹${formatPrice(item.price)}
+                    </td>
+                    <td>
+                        <a
+                            href="${item.url || '#'}"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            View Product
+                        </a>
+                    </td>
                 </tr>
             `;
         } else {
-            tableHTML += `
+            html += `
                 <tr>
                     <td>${platform.name}</td>
                     <td class="price-cell na">Not Available</td>
@@ -180,93 +258,105 @@ function displayComparison(product) {
         }
     });
 
-    tableHTML += `
+    html += `
             </tbody>
         </table>
     `;
 
-    comparisonTable.innerHTML = tableHTML;
+    table.innerHTML = html;
 }
 
 function displayGraph(product) {
     const graphSection = document.getElementById('graphSection');
+    const chartCanvas = document.getElementById('priceChart');
+
+    if (
+        !graphSection ||
+        !chartCanvas ||
+        typeof Chart === 'undefined'
+    ) {
+        return;
+    }
+
     graphSection.style.display = 'block';
 
-    // Get historical data from localStorage
     const history = getHistory();
     const productKey = product.model || product.name;
-    
-    // Get today's prices
     const today = new Date().toISOString().split('T')[0];
-    const platforms = ['flipkart', 'amazon', 'reliance', 'croma'];
-    
-    // Collect all dates (historical + today)
-    let allDates = [today];
-    if (history[productKey]) {
-        const historicalDates = Object.keys(history[productKey]).filter(date => date !== today);
-        allDates = [...historicalDates, today];
-    }
-    
-    // Sort dates chronologically and limit to 30 days
-    allDates.sort();
-    allDates = allDates.slice(-30);
-    
-    // Build datasets
-    const datasets = platforms.map(platform => {
-        const data = allDates.map(date => {
-            if (date === today) {
-                // Use current price from product
-                const priceData = product.prices[platform];
-                return priceData && priceData.price > 0 ? priceData.price : null;
-            } else {
-                // Use historical price
-                return history[productKey]?.[date]?.[platform] || null;
-            }
-        });
-        
-        return {
-            label: platform.charAt(0).toUpperCase() + platform.slice(1),
-            data: data,
-            borderColor: getPlatformColor(platform),
-            backgroundColor: getPlatformColor(platform, 0.1),
-            tension: 0.1,
-            fill: false
-        };
-    });
 
-    // Destroy existing chart if it exists
-    const ctx = document.getElementById('priceChart');
+    const platforms = [
+        'flipkart',
+        'amazon',
+        'reliance',
+        'croma'
+    ];
+
+    let dates = [today];
+
+    if (history[productKey]) {
+        dates = [
+            ...Object.keys(history[productKey]).filter(date => date !== today),
+            today
+        ];
+    }
+
+    dates = [...new Set(dates)].sort().slice(-30);
+
+    const datasets = platforms.map(platform => ({
+        label: platform.charAt(0).toUpperCase() + platform.slice(1),
+
+        data: dates.map(date => {
+            if (date === today) {
+                const item = (product.prices || {})[platform];
+
+                return item && Number(item.price) > 0
+                    ? Number(item.price)
+                    : null;
+            }
+
+            return history[productKey]?.[date]?.[platform] || null;
+        }),
+
+        borderColor: getPlatformColor(platform),
+        backgroundColor: getPlatformColor(platform, 0.1),
+        tension: 0.1,
+        fill: false
+    }));
+
     if (priceChart) {
         priceChart.destroy();
     }
 
-    // Create new chart
-    priceChart = new Chart(ctx, {
+    priceChart = new Chart(chartCanvas, {
         type: 'line',
+
         data: {
-            labels: allDates,
+            labels: dates,
             datasets: datasets
         },
+
         options: {
             responsive: true,
             maintainAspectRatio: false,
+
             plugins: {
                 title: {
                     display: true,
                     text: `Price Trend: ${product.name}`
                 },
+
                 legend: {
                     display: true,
                     position: 'top'
                 }
             },
+
             scales: {
                 y: {
                     beginAtZero: false,
+
                     ticks: {
-                        callback: function(value) {
-                            return '₹' + formatPrice(value);
-                        }
+                        callback: value => '₹' + formatPrice(value)
                     }
                 }
             }
@@ -279,139 +369,176 @@ function saveToHistory(query, products) {
     const today = new Date().toISOString().split('T')[0];
 
     products.forEach(product => {
-        const productKey = product.model || product.name;
-        
-        if (!history[productKey]) {
-            history[productKey] = {};
-        }
+        const key = product.model || product.name;
 
-        if (!history[productKey][today]) {
-            history[productKey][today] = {};
-        }
+        if (!key) return;
 
-        const platforms = ['flipkart', 'amazon', 'reliance', 'croma'];
-        platforms.forEach(platform => {
-            const priceData = product.prices[platform];
-            if (priceData && priceData.price > 0) {
-                history[productKey][today][platform] = priceData.price;
+        history[key] ||= {};
+        history[key][today] ||= {};
+
+        [
+            'flipkart',
+            'amazon',
+            'reliance',
+            'croma'
+        ].forEach(platform => {
+            const item = (product.prices || {})[platform];
+
+            if (item && Number(item.price) > 0) {
+                history[key][today][platform] = Number(item.price);
             }
         });
     });
 
-    // Clean up old data (keep only last 30 days)
-    Object.keys(history).forEach(productKey => {
-        const dates = Object.keys(history[productKey]).sort();
-        if (dates.length > 30) {
-            dates.slice(0, dates.length - 30).forEach(date => {
-                delete history[productKey][date];
+    Object.keys(history).forEach(key => {
+        const dates = Object.keys(history[key]).sort();
+
+        dates
+            .slice(0, Math.max(0, dates.length - 30))
+            .forEach(date => {
+                delete history[key][date];
             });
-        }
     });
 
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+    try {
+        localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify(history)
+        );
+    } catch (error) {
+        console.warn('Could not save price history:', error);
+    }
 }
 
 function getHistory() {
     try {
-        return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    } catch (e) {
+        return JSON.parse(
+            localStorage.getItem(STORAGE_KEY) || '{}'
+        );
+    } catch (error) {
         return {};
     }
 }
 
 function getPlatformColor(platform, alpha = 1) {
     const colors = {
-        flipkart: `rgba(40, 116, 240, ${alpha})`,      // Flipkart blue
-        amazon: `rgba(255, 153, 0, ${alpha})`,         // Amazon orange
-        reliance: `rgba(0, 102, 204, ${alpha})`,       // Reliance blue
-        croma: `rgba(220, 38, 38, ${alpha})`           // Croma red
+        flipkart: `rgba(40, 116, 240, ${alpha})`,
+        amazon: `rgba(255, 153, 0, ${alpha})`,
+        reliance: `rgba(0, 102, 204, ${alpha})`,
+        croma: `rgba(220, 38, 38, ${alpha})`
     };
-    return colors[platform] || `rgba(102, 126, 234, ${alpha})`;
+
+    return colors[platform] ||
+        `rgba(102, 126, 234, ${alpha})`;
 }
 
 function formatPrice(price) {
-    if (!price) return '0';
-    return price.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    const number = Number(price);
+
+    if (!Number.isFinite(number)) {
+        return '0';
+    }
+
+    return Math.round(number).toLocaleString('en-IN');
+}
+
+function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    })[character]);
 }
 
 function showLoading(show) {
-    document.getElementById('loadingIndicator').style.display = show ? 'block' : 'none';
+    const element = document.getElementById('loadingIndicator');
+
+    if (element) {
+        element.style.display = show ? 'block' : 'none';
+    }
 }
 
 function hideError() {
-    document.getElementById('errorMessage').style.display = 'none';
+    const element = document.getElementById('errorMessage');
+
+    if (element) {
+        element.style.display = 'none';
+    }
 }
 
 function showError(message) {
-    const errorEl = document.getElementById('errorMessage');
-    errorEl.textContent = message;
-    errorEl.style.display = 'block';
+    const element = document.getElementById('errorMessage');
+
+    if (element) {
+        element.textContent = message;
+        element.style.display = 'block';
+    }
 }
 
 function showResults() {
-    document.getElementById('resultsSection').style.display = 'block';
+    const element = document.getElementById('resultsSection');
+
+    if (element) {
+        element.style.display = 'block';
+    }
 }
 
 function hideResults() {
-    document.getElementById('resultsSection').style.display = 'none';
-    document.getElementById('comparisonSection').style.display = 'none';
-    document.getElementById('graphSection').style.display = 'none';
+    [
+        'resultsSection',
+        'comparisonSection',
+        'graphSection'
+    ].forEach(id => {
+        const element = document.getElementById(id);
+
+        if (element) {
+            element.style.display = 'none';
+        }
+    });
 }
 
-async function searchProduct() {
-  const query = document.getElementById('searchBox').value;
-  const res = await fetch(`/search?q=${encodeURIComponent(query)}`);
-  const data = await res.json();
+// Side navigation
+const sidenav = document.querySelector('.side-navbar');
 
-  const resultsDiv = document.getElementById('results');
-  resultsDiv.innerHTML = '';
-
-  if (data.length === 0) {
-    resultsDiv.innerHTML = '<p>No products found.</p>';
-    return;
-  }
-
-  data.forEach(product => {
-    const div = document.createElement('div');
-    div.className = 'product';
-    div.innerHTML = `
-      <h3>${product.name}</h3>
-      <p><strong>Vendor:</strong> ${product.vendor}</p>
-      <p><strong>Price:</strong> ₹${product.price}</p>
-      <a href="${product.link}" target="_blank">View Product</a>
-    `;
-    resultsDiv.appendChild(div);
-  });
+function shownavbar() {
+    if (sidenav) {
+        sidenav.style.left = '0';
+    }
 }
 
-
-let sidenav = document.querySelector(".side-navbar");
-function shownavbar(){
-    sidenav.style.left = "0";
-}
-function closenavbar(){
-    sidenav.style.left = "-50%";
+function closenavbar() {
+    if (sidenav) {
+        sidenav.style.left = '-50%';
+    }
 }
 
-//Back
+// Animated background
 const canvas = document.createElement('canvas');
-const ctx = canvas.getContext('2d');
+const backgroundContext = canvas.getContext('2d');
 const backgroundContainer = document.querySelector('.animated-background');
-backgroundContainer.appendChild(canvas);
 
-let width, height;
+if (backgroundContainer) {
+    backgroundContainer.appendChild(canvas);
+}
+
+let width = 0;
+let height = 0;
+
 const dots = [];
 const numDots = 200;
 
 function resizeCanvas() {
-    // Set canvas dimensions to match the window size for responsiveness
     width = canvas.width = window.innerWidth;
     height = canvas.height = window.innerHeight;
-    createDots(); // Re-create the dots so they are distributed correctly
+
+    createDots();
 }
 
 function createDots() {
-    dots.length = 0; // Clear existing dots
+    dots.length = 0;
+
     for (let i = 0; i < numDots; i++) {
         dots.push({
             x: Math.random() * width,
@@ -425,36 +552,51 @@ function createDots() {
 }
 
 function drawDots() {
-    ctx.clearRect(0, 0, width, height);
+    if (!backgroundContext) return;
 
-    for (let i = 0; i < numDots; i++) {
-        const dot1 = dots[i];
-        for (let j = i + 1; j < numDots; j++) {
-            const dot2 = dots[j];
-            const dx = dot1.x - dot2.x;
-            const dy = dot1.y - dot2.y;
+    backgroundContext.clearRect(0, 0, width, height);
+
+    for (let i = 0; i < dots.length; i++) {
+        const first = dots[i];
+
+        for (let j = i + 1; j < dots.length; j++) {
+            const second = dots[j];
+
+            const dx = first.x - second.x;
+            const dy = first.y - second.y;
             const distance = Math.sqrt(dx * dx + dy * dy);
 
             if (distance < 100) {
-                ctx.beginPath();
-                ctx.moveTo(dot1.x, dot1.y);
-                ctx.lineTo(dot2.x, dot2.y);
-                ctx.strokeStyle = `rgba(50, 150, 255, ${1 - distance / 100})`;
-                ctx.stroke();
+                backgroundContext.beginPath();
+                backgroundContext.moveTo(first.x, first.y);
+                backgroundContext.lineTo(second.x, second.y);
+
+                backgroundContext.strokeStyle =
+                    `rgba(50, 150, 255, ${1 - distance / 100})`;
+
+                backgroundContext.stroke();
             }
         }
     }
 
-    for (const dot of dots) {
-        ctx.beginPath();
-        ctx.arc(dot.x, dot.y, dot.radius, 0, Math.PI * 2);
-        ctx.fillStyle = dot.color;
-        ctx.fill();
-    }
+    dots.forEach(dot => {
+        backgroundContext.beginPath();
+
+        backgroundContext.arc(
+            dot.x,
+            dot.y,
+            dot.radius,
+            0,
+            Math.PI * 2
+        );
+
+        backgroundContext.fillStyle = dot.color;
+        backgroundContext.fill();
+    });
 }
 
 function updateDots() {
-    for (const dot of dots) {
+    dots.forEach(dot => {
         dot.x += dot.vx;
         dot.y += dot.vy;
 
@@ -462,18 +604,17 @@ function updateDots() {
         if (dot.x < 0) dot.x = width;
         if (dot.y > height) dot.y = 0;
         if (dot.y < 0) dot.y = height;
-    }
+    });
 }
 
 function animate() {
     updateDots();
     drawDots();
+
     requestAnimationFrame(animate);
 }
 
-// Event listeners to handle responsiveness
 window.addEventListener('resize', resizeCanvas);
 
-// Initial setup
 resizeCanvas();
 animate();
