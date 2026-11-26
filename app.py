@@ -1,130 +1,221 @@
+
+import os
+import sys
+import concurrent.futures
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import concurrent.futures
-import sys
-import os
 
+# Project directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(BASE_DIR)
+
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
 from mock_data import get_mock_results
 
-# Optional scrapers. The app continues to work with mock data if imports fail.
+# Optional scrapers
 try:
     from scrapers.flipkart import search_flipkart
+except Exception:
+    search_flipkart = None
+
+try:
     from scrapers.amazon import search_amazon
+except Exception:
+    search_amazon = None
+
+try:
     from scrapers.reliance import search_reliance
+except Exception:
+    search_reliance = None
+
+try:
     from scrapers.croma import search_croma
-    SCRAPING_ENABLED = True
-except Exception as exc:
-    print(f"Scrapers unavailable; using mock data only: {exc}")
-    SCRAPING_ENABLED = False
+except Exception:
+    search_croma = None
+
 
 app = Flask(__name__)
 CORS(app)
 
-# Keep False for reliable demo/deployment with sample data.
-# Enable only after confirming scrapers work reliably on your hosting provider.
-USE_REAL_SCRAPING = False
+# Scraping is disabled by default for stable free hosting.
+# Set USE_REAL_SCRAPING=true in Render environment variables
+# if you want to enable the scrapers.
+USE_REAL_SCRAPING = (
+    os.getenv("USE_REAL_SCRAPING", "false").lower() == "true"
+)
 
 
-@app.route("/", methods=["GET"])
-def index():
-    """Serve the website homepage."""
+@app.route("/")
+def home():
     return send_from_directory(BASE_DIR, "index.html")
 
 
-@app.route("/app.js", methods=["GET"])
-def javascript_file():
-    """Serve the frontend JavaScript."""
+@app.route("/app.js")
+def javascript():
     return send_from_directory(BASE_DIR, "app.js")
 
 
-@app.route("/styles.css", methods=["GET"])
-def css_file():
-    """Serve the frontend stylesheet."""
+@app.route("/styles.css")
+def stylesheet():
     return send_from_directory(BASE_DIR, "styles.css")
+
+
+@app.route("/api/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
+@app.route("/api")
+def api_info():
+    return jsonify({
+        "message": "Product Price Comparison API",
+        "endpoints": {
+            "health": "/api/health",
+            "search": "/api/search?query=<product_name>"
+        }
+    }), 200
+
+
+def run_scraper(scraper, query):
+    """Run one scraper safely."""
+    if scraper is None:
+        return []
+
+    try:
+        data = scraper(query)
+
+        if data is None:
+            return []
+
+        if isinstance(data, list):
+            return data
+
+        if isinstance(data, dict):
+            if isinstance(data.get("results"), list):
+                return data["results"]
+            return [data]
+
+        return []
+
+    except Exception as exc:
+        app.logger.warning("A product scraper failed: %s", exc)
+        return []
+
+
+def get_scraped_results(query):
+    """Run available scrapers concurrently."""
+    scraper_functions = [
+        search_amazon,
+        search_flipkart,
+        search_croma,
+        search_reliance,
+    ]
+
+    scraper_functions = [
+        scraper for scraper in scraper_functions
+        if scraper is not None
+    ]
+
+    if not scraper_functions:
+        return []
+
+    combined_results = []
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(4, len(scraper_functions))
+    ) as executor:
+
+        futures = [
+            executor.submit(run_scraper, scraper, query)
+            for scraper in scraper_functions
+        ]
+
+        for future in concurrent.futures.as_completed(
+            futures, timeout=45
+        ):
+            try:
+                combined_results.extend(future.result())
+            except Exception as exc:
+                app.logger.warning(
+                    "Scraper task failed: %s", exc
+                )
+
+    return combined_results
 
 
 @app.route("/api/search", methods=["GET"])
 def search_products():
-    """Search products and return mock data, or scraper data if enabled."""
-    query = request.args.get("query", "").strip()
+    """Search products using mock data and optional scrapers."""
+
+    query = (
+        request.args.get("query")
+        or request.args.get("q")
+        or ""
+    ).strip()
 
     if not query:
-        return jsonify({"error": "Query parameter is required"}), 400
+        return jsonify({
+            "error": "Please provide a product name."
+        }), 400
 
-    results = {
-        "query": query,
-        "products": []
-    }
+    try:
+        # Use the project's mock data.
+        mock_results = get_mock_results(query)
 
-    mock_results = get_mock_results(query)
-    scraped_results = []
+        # Stable default for Render free hosting.
+        if not USE_REAL_SCRAPING:
+            return jsonify(mock_results), 200
 
-    if USE_REAL_SCRAPING and SCRAPING_ENABLED:
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {
-                    "flipkart": executor.submit(search_flipkart, query),
-                    "amazon": executor.submit(search_amazon, query),
-                    "reliance": executor.submit(search_reliance, query),
-                    "croma": executor.submit(search_croma, query),
-                }
+        # Optional real scraping.
+        scraped_results = get_scraped_results(query)
 
-                platform_results = {}
-                for platform, future in futures.items():
-                    try:
-                        platform_results[platform] = future.result(timeout=10) or []
-                    except Exception as exc:
-                        print(f"{platform} scraper failed: {exc}")
-                        platform_results[platform] = []
+        # Preserve the response format from mock_data.py.
+        if isinstance(mock_results, dict):
 
-            product_map = {}
+            if isinstance(mock_results.get("results"), list):
+                mock_results["results"].extend(
+                    scraped_results
+                )
+                return jsonify(mock_results), 200
 
-            for platform, items in platform_results.items():
-                for item in items:
-                    model = item.get("model") or item.get("name") or ""
-                    model_key = model.lower().strip()
+            return jsonify(mock_results), 200
 
-                    if not model_key:
-                        continue
+        if isinstance(mock_results, list):
+            return jsonify(
+                mock_results + scraped_results
+            ), 200
 
-                    if model_key not in product_map:
-                        product_map[model_key] = {
-                            "name": item.get("name") or model,
-                            "model": model,
-                            "prices": {}
-                        }
+        return jsonify({
+            "query": query,
+            "results": scraped_results
+        }), 200
 
-                    product_map[model_key]["prices"][platform] = {
-                        "price": item.get("price", 0),
-                        "url": item.get("url", ""),
-                        "image": item.get("image", "")
-                    }
+    except Exception:
+        app.logger.exception("Product search failed")
 
-            scraped_results = list(product_map.values())
-
-        except Exception as exc:
-            print(f"Scraping error: {exc}")
-            scraped_results = []
-
-    results["products"] = (
-        scraped_results if scraped_results else mock_results
-    )
-
-    return jsonify(results)
+        return jsonify({
+            "error": "Product search failed. Please try again."
+        }), 500
 
 
-@app.route("/api/health", methods=["GET"])
-def health_check():
-    return jsonify({"status": "ok"})
+@app.errorhandler(404)
+def not_found(error):
+    if request.path.startswith("/api/"):
+        return jsonify({
+            "error": "API endpoint not found"
+        }), 404
+
+    return jsonify({
+        "error": "Page not found"
+    }), 404
 
 
 if __name__ == "__main__":
-    # Local development only. Render starts the app with Gunicorn.
+    port = int(os.environ.get("PORT", "5000"))
+
     app.run(
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
+        port=port,
         debug=False
     )
